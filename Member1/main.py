@@ -1,3 +1,12 @@
+import sys
+import os
+
+# This tells Python to look outside Member1 to find the 'backend' folder
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from backend.database import hospital_balances
+
+
 import google.generativeai as genai
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,3 +52,39 @@ async def search(query: str):
     result["ward_share"] = price * 0.10
     
     return {"status": "success", "data": result}
+
+# 1. This function saves every bill to a file for Member 2 to see
+def save_to_ledger(entry):
+    file_path = "ledger.json"
+    data = []
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    data.append(entry)
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=4)
+
+# 2. This is the endpoint the "Confirm" button will call
+@app.post("/confirm-billing")
+async def confirm_billing(item: dict):
+    price = float(item.get("price", 0))
+    ward_cut = price * 0.10  # 10% for hiring
+    
+    # Update the shared balances you imported
+    hospital_balances["ward_balance"] += ward_cut
+    hospital_balances["general_balance"] += (price - ward_cut)
+    
+    # Save to the ledger file
+    save_to_ledger({
+        "diagnosis": item.get("term"),
+        "total_price": price,
+        "hiring_contribution": ward_cut
+    })
+    
+    remaining = hospital_balances["hiring_goal"] - hospital_balances["ward_balance"]
+    
+    return {
+        "status": "Success",
+        "hiring_fund_new_total": hospital_balances["ward_balance"],
+        "remaining_to_goal": max(0, remaining)
+    }
