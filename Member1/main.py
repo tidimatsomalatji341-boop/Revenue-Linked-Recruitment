@@ -88,3 +88,7 @@ async def confirm_billing(item: dict):
         "hiring_fund_new_total": hospital_balances["ward_balance"],
         "remaining_to_goal": max(0, remaining)
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
