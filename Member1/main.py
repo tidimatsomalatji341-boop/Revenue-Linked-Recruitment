@@ -1,93 +1,86 @@
-import sys
 import os
-
-# This tells Python to look outside Member1 to find the 'backend' folder
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from backend.database import hospital_balances
-
-
+import json
 import google.generativeai as genai
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from data import medical_codes
-import json
 
-app = FastAPI()
+app = FastAPI(title="Medical Code Search API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Use your key here
+# Your API Key
 genai.configure(api_key="AIzaSyDMcBAkB5WK1O540YBA_YFIPK82n3zbOlo")
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 @app.get("/search")
 async def search(query: str):
+    result = None
+    query_lower = query.lower().strip()
+    
     try:
-        # 1. Attempt AI Search
-        prompt = f"Match '{query}' to one item in {medical_codes}. Return ONLY JSON: {{\"term\": \"name\", \"code\": \"icd10\", \"price\": 0}}"
+        # 1. The "Strict" Prompt: Forces the AI to use YOUR specific list
+        prompt = (
+            f"User input: '{query}'. "
+            f"Available Database: {medical_codes}. "
+            f"Find the most relevant entry from the database. "
+            f"Return ONLY a JSON object: {{\"term\": \"...\", \"code\": \"...\", \"price\": 0}}. "
+            f"Do not invent new codes. If unsure, pick the most similar medical condition."
+        )
+        
         response = model.generate_content(prompt)
+        clean_text = response.text.strip().replace("```json", "").replace("```", "")
         
-        # Strip any AI chatter
-        text = response.text
-        json_data = text[text.find("{"):text.rfind("}")+1]
-        result = json.loads(json_data)
-        
+        start = clean_text.find("{")
+        end = clean_text.rfind("}") + 1
+        if start != -1:
+            result = json.loads(clean_text[start:end])
+            
     except Exception as e:
-        print(f"AI Failed, using local search... Error: {e}")
-        # 2. Backup Plan: Local Search (Demo Saver!)
-        result = {"term": "Manual Review Required", "code": "000.0", "price": 0}
+        print(f"AI Search Error: {e}")
+
+    # 2. THE FIX: Cross-Reference with your local data
+    # If the AI gave us a result, let's make sure that 'code' exists in our list to get the REAL price.
+    matched_item = None
+    
+    if result and result.get("code") != "000.0":
+        # Search our list of 25 for the code the AI suggested
         for item in medical_codes:
-            if query.lower() in item["term"].lower():
-                result = item
+            if item["code"] == result.get("code"):
+                matched_item = item
                 break
-    
-    # Calculate the 10% Ward Fund
-    price = float(result.get("price", 0))
-    result["ward_share"] = price * 0.10
-    
-    return {"status": "success", "data": result}
 
-# 1. This function saves every bill to a file for Member 2 to see
-def save_to_ledger(entry):
-    file_path = "ledger.json"
-    data = []
-    if os.path.exists(file_path):
-        with open(file_path, "r") as f:
-            data = json.load(f)
-    data.append(entry)
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
+    # 3. SMART BACKUP: If the AI failed or the code wasn't found, do a keyword scan
+    if not matched_item:
+        for item in medical_codes:
+            # Check if query words (like 'sugar' or 'flu') are in the medical terms
+            if query_lower in item["term"].lower() or item["term"].lower() in query_lower:
+                matched_item = item
+                break
 
-# 2. This is the endpoint the "Confirm" button will call
-@app.post("/confirm-billing")
-async def confirm_billing(item: dict):
-    price = float(item.get("price", 0))
-    ward_cut = price * 0.10  # 10% for hiring
+    # 4. Final Result Construction
+    if matched_item:
+        final_data = {
+            "term": matched_item["term"],
+            "code": matched_item["code"],
+            "price": matched_item["price"],
+            "ward_share": float(matched_item["price"]) * 0.10
+        }
+    else:
+        final_data = {
+            "term": "Manual Review Required",
+            "code": "000.0",
+            "price": 0,
+            "ward_share": 0
+        }
     
-    # Update the shared balances you imported
-    hospital_balances["ward_balance"] += ward_cut
-    hospital_balances["general_balance"] += (price - ward_cut)
-    
-    # Save to the ledger file
-    save_to_ledger({
-        "diagnosis": item.get("term"),
-        "total_price": price,
-        "hiring_contribution": ward_cut
-    })
-    
-    remaining = hospital_balances["hiring_goal"] - hospital_balances["ward_balance"]
-    
-    return {
-        "status": "Success",
-        "hiring_fund_new_total": hospital_balances["ward_balance"],
-        "remaining_to_goal": max(0, remaining)
-    }
+    return {"status": "success", "data": final_data}
 
 if __name__ == "__main__":
     import uvicorn
