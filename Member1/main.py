@@ -82,6 +82,83 @@ async def search(query: str):
     
     return {"status": "success", "data": final_data}
 
+@app.post("/clarify-diagnosis")
+async def clarify_diagnosis(diagnosis: str, clarification_response: str = None):
+    """
+    Uses Gemini AI to intelligently clarify a vague diagnosis.
+    If clarification_response is provided, it refines the diagnosis further.
+    Returns the final diagnosis with ICD-10 code or follow-up questions needed.
+    """
+    try:
+        database_context = json.dumps(medical_codes)
+        
+        if not clarification_response:
+            # Stage 1: Initial diagnosis - Ask what clarification is needed
+            prompt = (
+                f"A doctor has reported this patient condition: '{diagnosis}'. "
+                f"Our available medical database has these conditions: {database_context}. "
+                f"To identify the exact billable ICD-10 code from our database, generate 1-2 specific clarification questions "
+                f"that would help narrow down the diagnosis. "
+                f"IMPORTANT: The questions should lead to answers from our actual database. "
+                f"Return ONLY valid JSON: {{'needs_clarification': true, 'question': '...', 'options': ['...', '...']}} "
+                f"If the diagnosis is already specific enough in our database, return: "
+                f"{{'needs_clarification': false, 'matched_diagnosis': '...', 'code': '...', 'price': 0}}"
+            )
+        else:
+            # Stage 2: Refined diagnosis - Match with database using clarification
+            prompt = (
+                f"The doctor initially reported: '{diagnosis}'. "
+                f"When asked for clarification, they responded: '{clarification_response}'. "
+                f"Available database: {database_context}. "
+                f"Using this context, find the most accurate diagnosis from our database. "
+                f"Return ONLY valid JSON: {{'matched_diagnosis': '...', 'code': '...', 'price': 0, 'description': '...'}}"
+            )
+        
+        response = model.generate_content(prompt)
+        clean_text = response.text.strip().replace("```json", "").replace("```", "").replace("```python", "")
+        
+        start = clean_text.find("{")
+        end = clean_text.rfind("}") + 1
+        if start != -1 and end > start:
+            result = json.loads(clean_text[start:end])
+            
+            # If matched_diagnosis provided, cross-reference with database
+            if result.get("matched_diagnosis"):
+                for item in medical_codes:
+                    if item["term"].lower() == result.get("matched_diagnosis", "").lower() or \
+                       item["code"] == result.get("code"):
+                        return {
+                            "status": "success",
+                            "diagnosis": item["term"],
+                            "code": item["code"],
+                            "price": item["price"],
+                            "ward_share": float(item["price"]) * 0.10,
+                            "needs_clarification": False
+                        }
+            
+            # If needs clarification
+            if result.get("needs_clarification"):
+                return {
+                    "status": "success",
+                    "needs_clarification": True,
+                    "question": result.get("question", "Please provide more details"),
+                    "options": result.get("options", [])
+                }
+            
+            return {"status": "success", "data": result}
+        
+    except Exception as e:
+        print(f"Clarification Error: {e}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    return {
+        "status": "error",
+        "error": "Could not process diagnosis"
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
